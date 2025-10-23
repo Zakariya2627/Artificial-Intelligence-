@@ -1,0 +1,317 @@
+import kagglehub
+
+# Download latest version
+path = kagglehub.dataset_download("orzhiang/compiled-onestopenglish-corpus")
+
+print("Path to dataset files:", path)
+
+import os
+
+path = "/root/.cache/kagglehub/datasets/orzhiang/compiled-onestopenglish-corpus/versions/4"
+os.listdir(path)
+
+import pandas as pd
+
+file_path = path + "/OneStopEnglishCorpus_compiled.csv"
+df = pd.read_csv(file_path)
+df.head()
+level_map = {0: "Elementary", 1: "Intermediate", 2: "Advanced"}
+df["level"] = df["target"].map(level_map)
+df.head()
+
+print(df.iloc[0]["cleaned_text"])
+print("Level:", df.iloc[0]["level"])
+df["text_length"] = df["cleaned_text"].apply(lambda x: len(str(x).split()))
+df.groupby("level")["text_length"].mean()
+
+import matplotlib.pyplot as plt
+
+df.groupby("level")["text_length"].mean().plot(kind="bar")
+plt.title("Average Text Length by Reading Level")
+plt.ylabel("Average Word Count")
+plt.show()
+
+# OneStopEnglish - Full Colab-ready script
+# This single-file script includes:
+# 1) Load dataset
+# 2) EDA (length, top words, wordcloud)
+# 3) TF-IDF + LogisticRegression baseline (train, evaluate, save)
+# 4) Optional DistilBERT training block (commented) for GPU usage
+#
+# Usage: open in Colab, adjust 'path' if needed, run cells sequentially.
+
+# --------------------------
+# 0) Configuration / imports
+# --------------------------
+import os
+import pandas as pd
+import numpy as np
+from collections import Counter
+import matplotlib.pyplot as plt
+
+# Optional (only if you want wordclouds)
+try:
+    from wordcloud import WordCloud
+    _HAS_WORDCLOUD = True
+except Exception:
+    _HAS_WORDCLOUD = False
+
+# For ML baseline
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import joblib
+
+# For seaborn heatmap (optional)
+try:
+    import seaborn as sns
+    _HAS_SEABORN = True
+except Exception:
+    _HAS_SEABORN = False
+
+# --------------------------
+# 1) Load dataset - adjust path if needed
+# --------------------------
+# If you used kagglehub to download, path is usually:
+default_path = "/root/.cache/kagglehub/datasets/orzhiang/compiled-onestopenglish-corpus/versions/4"
+print("Default path set to:", default_path)
+
+# If running locally change this to the folder containing OneStopEnglishCorpus_compiled.csv
+path = default_path
+file_name = "OneStopEnglishCorpus_compiled.csv"
+file_path = os.path.join(path, file_name)
+
+if not os.path.exists(file_path):
+    raise FileNotFoundError(f"CSV not found at {file_path}. Update 'path' variable to the correct folder.")
+
+print("Loading:", file_path)
+df = pd.read_csv(file_path)
+print("Loaded shape:", df.shape)
+print("Columns:", df.columns.tolist())
+
+# --------------------------
+# 2) Inspect & normalize columns
+# --------------------------
+# This dataset sometimes has columns named differently (e.g., cleaned_text). We normalize to X and y.
+if "cleaned_text" in df.columns:
+    text_col = "cleaned_text"
+elif "text" in df.columns:
+    text_col = "text"
+else:
+    # fallback to the last object column
+    obj_cols = df.select_dtypes(include=[object]).columns.tolist()
+    if len(obj_cols) == 0:
+        raise ValueError("No text column found. Columns: " + str(df.columns.tolist()))
+    text_col = obj_cols[-1]
+    print("Auto-selected text column:", text_col)
+
+# target column
+if "target" in df.columns:
+    label_col = "target"
+elif "label" in df.columns:
+    label_col = "label"
+elif "level" in df.columns:
+    # if level contains strings like Elementary, map them to integers
+    if df["level"].dtype == object:
+        df["level_str"] = df["level"].astype(str)
+        mapping = {v:i for i,v in enumerate(sorted(df["level_str"].unique()))}
+        df["target"] = df["level_str"].map(mapping)
+        label_col = "target"
+        print("Mapped string levels to numeric using mapping:", mapping)
+    else:
+        label_col = "level"
+else:
+    # try common fallbacks
+    possible = [c for c in df.columns if df[c].dtype in ["int64","float64"] and df[c].nunique()<=10]
+    if len(possible)>0:
+        label_col = possible[0]
+        print("Auto-selected label column:", label_col)
+    else:
+        raise ValueError("No label column found. Columns: " + str(df.columns.tolist()))
+
+print("Using text column:", text_col, "and label column:", label_col)
+
+# Keep only needed columns to avoid surprises
+df = df[[text_col, label_col]].rename(columns={text_col: "text", label_col: "target"}).dropna()
+
+# If target is string with level names, map to numeric
+if df["target"].dtype == object:
+    unique = sorted(df["target"].unique())
+    mapping = {v:i for i,v in enumerate(unique)}
+    df["target"] = df["target"].map(mapping)
+    print("Mapped targets:", mapping)
+
+level_map = {0: "Elementary", 1: "Intermediate", 2: "Advanced"}
+# If target uses 0/1/2 that's fine. If mapping is different, user can override level_map.
+
+# create readable level column when possible
+try:
+    df["level"] = df["target"].map(level_map)
+except Exception:
+    df["level"] = df["target"].astype(str)
+
+# quick stats
+print(df["level"].value_counts())
+
+# --------------------------
+# 3) Basic preprocessing & EDA
+# --------------------------
+# text_length (word count)
+df["text_length"] = df["text"].astype(str).apply(lambda x: len(x.split()))
+print(df["text_length"].describe())
+
+# plot average length
+plt.figure(figsize=(6,4))
+order = ["Elementary","Intermediate","Advanced"]
+means = df.groupby("level")["text_length"].mean().reindex(order)
+means.plot(kind="bar")
+plt.title("Average Text Length by Level")
+plt.ylabel("Average Word Count")
+plt.tight_layout()
+plt.show()
+
+# Top words per level
+print('\nTop words per level (top 15):')
+for lvl in df["level"].unique():
+    words = " ".join(df[df["level"]==lvl]["text"].astype(str)).split()
+    common = Counter(words).most_common(15)
+    print(f"\n{lvl}:")
+    for w,c in common:
+        print(w, c)
+
+# Optional wordclouds
+if _HAS_WORDCLOUD:
+    for lvl in df["level"].unique():
+        text = " ".join(df[df["level"]==lvl]["text"].astype(str))
+        wc = WordCloud(width=800, height=400, background_color="white").generate(text)
+        plt.figure(figsize=(10,5))
+        plt.imshow(wc, interpolation="bilinear")
+        plt.axis("off")
+        plt.title(f"WordCloud - {lvl}")
+        plt.show()
+else:
+    print('\nWordCloud not available (install wordcloud to enable).')
+
+# --------------------------
+# 4) TF-IDF + Logistic Regression baseline
+# --------------------------
+print('\nStarting TF-IDF + LogisticRegression baseline...')
+X = df["text"].astype(str)
+y = df["target"].astype(int)
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+
+pipeline = make_pipeline(
+    TfidfVectorizer(max_features=10000, ngram_range=(1,2)),
+    LogisticRegression(max_iter=400, multi_class="multinomial", solver="saga")
+)
+
+pipeline.fit(X_train, y_train)
+
+y_pred = pipeline.predict(X_test)
+print("Accuracy:", accuracy_score(y_test, y_pred))
+print("Classification report:\n", classification_report(y_test, y_pred))
+
+# Confusion matrix
+cm = confusion_matrix(y_test, y_pred)
+if _HAS_SEABORN:
+    plt.figure(figsize=(6,5))
+    sns.heatmap(cm, annot=True, fmt="d", xticklabels=order, yticklabels=order)
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.title("Confusion Matrix")
+    plt.show()
+else:
+    print("\nConfusion matrix:\n", cm)
+
+# Save model
+model_path = "onestop_tfidf_logreg.pkl"
+joblib.dump(pipeline, model_path)
+print(f"Saved baseline model to {model_path}")
+
+# --------------------------
+# 5) Example usage: predict on new text
+# --------------------------
+
+def predict_text(texts):
+    preds = pipeline.predict(texts)
+    return [level_map.get(int(p), str(p)) for p in preds]
+
+# quick sample
+sample_texts = X_test.sample(3, random_state=7).tolist()
+for t, p in zip(sample_texts, predict_text(sample_texts)):
+    print('\n--- SAMPLE PREDICTION ---')
+    print('Predicted level:', p)
+    print(t[:500], '...')
+
+# --------------------------
+# 6) (Optional) DistilBERT training - uncomment when you have GPU and want to fine-tune
+# --------------------------
+# NOTE: This block is optional and may require installing packages and GPU. Use only if you
+# understand Hugging Face Trainer basics and have enough RAM/GPU time.
+
+# To enable, uncomment the block below and run. You may need to `pip install transformers datasets evaluate`.
+
+# # ------------------
+# # Install required packages (run once)
+# # ------------------
+# # !pip install -q transformers datasets evaluate tokenizers
+#
+# from datasets import Dataset
+# from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
+# import evaluate
+#
+# # prepare datasets
+# hf_train = Dataset.from_pandas(pd.DataFrame({"text": X_train, "label": y_train}))
+# hf_test  = Dataset.from_pandas(pd.DataFrame({"text": X_test,  "label": y_test}))
+#
+# model_name = "distilbert-base-uncased"
+# tokenizer = AutoTokenizer.from_pretrained(model_name)
+#
+# def preprocess(batch):
+#     return tokenizer(batch["text"], truncation=True, padding="max_length", max_length=128)
+#
+# hf_train = hf_train.map(preprocess, batched=True)
+# hf_test  = hf_test.map(preprocess, batched=True)
+#
+# model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=len(df["target"].unique()))
+#
+# training_args = TrainingArguments(
+#     output_dir="./distilbert-onestop",
+#     evaluation_strategy="epoch",
+#     per_device_train_batch_size=8,
+#     per_device_eval_batch_size=16,
+#     num_train_epochs=2,
+#     save_total_limit=1,
+#     logging_steps=50,
+#     load_best_model_at_end=True,
+#     metric_for_best_model="accuracy"
+# )
+#
+# accuracy = evaluate.load("accuracy")
+# f1 = evaluate.load("f1")
+#
+# def compute_metrics(eval_pred):
+#     logits, labels = eval_pred
+#     preds = np.argmax(logits, axis=-1)
+#     return {"accuracy": accuracy.compute(predictions=preds, references=labels)["accuracy"],
+#             "f1_macro": f1.compute(predictions=preds, references=labels, average="macro")["f1"]}
+#
+# trainer = Trainer(
+#     model=model,
+#     args=training_args,
+#     train_dataset=hf_train,
+#     eval_dataset=hf_test,
+#     compute_metrics=compute_metrics,
+# )
+#
+# trainer.train()
+#
+# # save
+# trainer.save_model("distilbert_onestop_model")
+# print("Saved DistilBERT model to distilbert_onestop_model")
+
+# End of script
+print('\nScript finished.')
