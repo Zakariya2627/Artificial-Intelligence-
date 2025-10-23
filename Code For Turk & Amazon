@@ -1,0 +1,57 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+# list of cleaned files you just uploaded
+cleaned_files = [
+    "/content/cleaned_tune.8turkers.organized.csv",
+    "/content/cleaned_test.8turkers.organized.csv",
+    "/content/cleaned_amazon.csv"
+]
+
+def detect_text_cols(df):
+    cols = [c.lower() for c in df.columns]
+    candidates = [c for c in cols if any(k in c for k in [
+        'src','source','original','sentence','complex','simple','simplified','target','text','annotator'
+    ])]
+    if len(candidates) >= 2:
+        return candidates[0], candidates[1]
+    if len(cols) >= 2:
+        return cols[0], cols[1]
+    return cols[0], cols[0]
+
+# loop through all your cleaned files
+for file_path in cleaned_files:
+    if not Path(file_path).exists():
+        print(f"⚠️ File not found: {file_path}")
+        continue
+
+    print(f"\n📂 Analyzing: {file_path}")
+    df = pd.read_csv(file_path)
+    df.columns = [c.lower() for c in df.columns]
+    
+    # detect text columns automatically
+    col_a, col_b = detect_text_cols(df)
+    print(f"Detected columns: {col_a}, {col_b}")
+
+    # compute sentence lengths
+    df["len_a"] = df[col_a].astype(str).str.split().apply(len)
+    df["len_b"] = df[col_b].astype(str).str.split().apply(len)
+
+    # show stats
+    print("\n📈 Length statistics:")
+    display(df[["len_a", "len_b"]].describe())
+
+    # show histograms
+    plt.figure(figsize=(8,4))
+    plt.hist(df["len_a"], bins=30, alpha=0.7, label=col_a)
+    plt.hist(df["len_b"], bins=30, alpha=0.7, label=col_b)
+    plt.legend()
+    plt.title(f"Sentence Length Comparison ({Path(file_path).stem})")
+    plt.xlabel("Words per sentence")
+    plt.ylabel("Frequency")
+    plt.show()
+
+    # show random examples
+    print("\n🧩 Random sentence pairs (complex → simple):")
+    display(df.sample(min(10, len(df)))[[col_a, col_b, "len_a", "len_b"]])
